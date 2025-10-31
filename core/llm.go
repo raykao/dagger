@@ -39,6 +39,7 @@ const (
 	modelDefaultOpenAI    = "gpt-4.1"
 	modelDefaultMeta      = "llama-3.2"
 	modelDefaultMistral   = "mistral-7b-instruct"
+	modelDefaultGitHub    = "gpt-5"
 )
 
 func resolveModelAlias(maybeAlias string) string {
@@ -53,6 +54,8 @@ func resolveModelAlias(maybeAlias string) string {
 		return modelDefaultMeta
 	case "mistral":
 		return modelDefaultMistral
+	case "github":
+		return modelDefaultGitHub
 	default:
 		// not a recognized alias
 		return maybeAlias
@@ -148,6 +151,7 @@ const (
 	Meta      LLMProvider = "meta"
 	Mistral   LLMProvider = "mistral"
 	DeepSeek  LLMProvider = "deepseek"
+	GitHub    LLMProvider = "github"
 	Other     LLMProvider = "other"
 )
 
@@ -166,6 +170,9 @@ type LLMRouter struct {
 	GeminiAPIKey  string
 	GeminiBaseURL string
 	GeminiModel   string
+
+	GitHubToken string
+	GitHubModel string
 }
 
 func (r *LLMRouter) isAnthropicModel(model string) bool {
@@ -182,6 +189,10 @@ func (r *LLMRouter) isGoogleModel(model string) bool {
 
 func (r *LLMRouter) isMistralModel(model string) bool {
 	return strings.HasPrefix(model, "mistral-") || strings.HasPrefix(model, "mistral/")
+}
+
+func (r *LLMRouter) isGitHubModel(model string) bool {
+	return strings.HasPrefix(model, "github-") || strings.HasPrefix(model, "github/")
 }
 
 func (r *LLMRouter) isReplay(model string) bool {
@@ -244,6 +255,17 @@ func (r *LLMRouter) routeGoogleModel() (*LLMEndpoint, error) {
 	return endpoint, nil
 }
 
+func (r *LLMRouter) routeGitHubModel() *LLMEndpoint {
+	endpoint := &LLMEndpoint{
+		Key:      r.GitHubToken,
+		Provider: GitHub,
+	}
+
+	endpoint.Client = newGhcpClient(endpoint, nil, nil)
+
+	return endpoint
+}
+
 func (r *LLMRouter) routeOtherModel() *LLMEndpoint {
 	// default to openAI compat from other providers
 	endpoint := &LLMEndpoint{
@@ -268,7 +290,7 @@ func (r *LLMRouter) routeReplayModel(model string) (*LLMEndpoint, error) {
 
 // Return a default model, if configured
 func (r *LLMRouter) DefaultModel() string {
-	for _, model := range []string{r.OpenAIModel, r.AnthropicModel, r.GeminiModel} {
+	for _, model := range []string{r.OpenAIModel, r.AnthropicModel, r.GeminiModel, r.GitHubModel} {
 		if model != "" {
 			return model
 		}
@@ -284,6 +306,9 @@ func (r *LLMRouter) DefaultModel() string {
 	}
 	if r.GeminiAPIKey != "" {
 		return modelDefaultGoogle
+	}
+	if r.GitHubToken != "" {
+		return modelDefaultGitHub
 	}
 	return ""
 }
@@ -315,6 +340,8 @@ func (r *LLMRouter) Route(model string) (*LLMEndpoint, error) {
 		if err != nil {
 			return nil, err
 		}
+	case r.isGitHubModel(model):
+		endpoint = r.routeGitHubModel()
 	default:
 		endpoint = r.routeOtherModel()
 	}
@@ -372,6 +399,13 @@ func (r *LLMRouter) LoadConfig(ctx context.Context, getenv func(context.Context,
 	})
 	eg.Go(func() error {
 		return save("GEMINI_MODEL", &r.GeminiModel)
+	})
+
+	eg.Go(func() error {
+		return save("GITHUB_TOKEN", &r.GitHubToken)
+	})
+	eg.Go(func() error {
+		return save("GITHUB_MODEL", &r.GitHubModel)
 	})
 
 	var (
