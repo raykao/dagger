@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/log"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -20,10 +22,11 @@ type GhcpClient struct {
 	endpoint *LLMEndpoint
 }
 
-func newGhcpClient(endpoint *LLMEndpoint) *GhcpClient {
+func newGhcpClient(endpoint *LLMEndpoint, cliVersion string) *GhcpClient {
 	ctx := context.Background()
 
-	var container = GhcpContainer(ctx, endpoint.Key)
+	// Since there is no official Go SDK for GitHub Copilot at the moment, we will use the GitHub Copilot CLI via a Dagger container.
+	var container = GhcpContainer(ctx, endpoint.Key, cliVersion)
 
 	return &GhcpClient{
 		client:   container,
@@ -36,10 +39,11 @@ var _ LLMClient = (*GhcpClient)(nil)
 func GhcpContainer(
 	ctx context.Context,
 	token string,
+	cliVersion string,
 ) *dagger.Container {
 	return dag.Container().
 		From("node:24-bookworm-slim").
-		WithExec([]string{"npm", "install", "-g", "@github/copilot"}).
+		WithExec([]string{"npm", "install", "-g", fmt.Sprintf("@github/copilot@%s", cliVersion)}).
 		WithEnvVariable("GITHUB_TOKEN", token).
 		WithWorkdir("/workspace")
 }
@@ -55,11 +59,34 @@ func (c *GhcpClient) SendQuery(ctx context.Context, history []*ModelMessage, too
 
 	m := telemetry.Meter(ctx, InstrumentationLibrary)
 	spanCtx := trace.SpanContextFromContext(ctx)
-	// end instrument the call with telemetry
+
+	attrs := []attribute.KeyValue{
+		attribute.String(telemetry.MetricsTraceIDAttr, spanCtx.TraceID().String()),
+		attribute.String(telemetry.MetricsSpanIDAttr, spanCtx.SpanID().String()),
+		attribute.String("model", c.endpoint.Model),
+		attribute.String("provider", string(c.endpoint.Provider)),
+	}
+
+	inputTokens, err := m.Int64Gauge(telemetry.LLMInputTokens)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get inputTokens gauge: %w", err)
+	}
+
+	inputTokensCacheReads, err := m.Int64Gauge(telemetry.LLMInputTokensCacheReads)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get inputTokensCacheReads gauge: %w", err)
+	}
+
+	outputTokens, err := m.Int64Gauge(telemetry.LLMOutputTokens)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get outputTokens gauge: %w", err)
+	}
 
 	var client = c.client
 
 	var toolCalls []LLMToolCall
+
+	client.WithEnvVariable("GITHUB_TOKEN", c.endpoint.Key)
 
 	content, err := client.Stdout(ctx)
 	if err != nil {
@@ -71,9 +98,12 @@ func (c *GhcpClient) SendQuery(ctx context.Context, history []*ModelMessage, too
 		return nil, err
 	}
 
-	client.WithEnvVariable("GITHUB_TOKEN", c.endpoint.Key)
+	llmTokenUsage := parseCopilotTokenMetadata(ghcpResponseMetadata)
 
-	llmTokenUsage := parseLLMTokenUsage(ghcpResponseMetadata)
+	// Record metrics for token usage with attributes in OTel
+	inputTokens.Record(ctx, llmTokenUsage.InputTokens, metric.WithAttributes(attrs...))
+	outputTokens.Record(ctx, llmTokenUsage.OutputTokens, metric.WithAttributes(attrs...))
+	inputTokensCacheReads.Record(ctx, llmTokenUsage.CachedTokenReads, metric.WithAttributes(attrs...))
 
 	return &LLMResponse{
 		Content:    content,
@@ -88,64 +118,41 @@ func (c *GhcpClient) IsRetryable(err error) bool {
 	return false
 }
 
-func processTelemetryAttributes(ctx context.Context, endpoint LLMEndpoint) ([]attribute.KeyValue, error) {
-
-	attrs := []attribute.KeyValue{
-		attribute.String(telemetry.MetricsTraceIDAttr, spanCtx.TraceID().String()),
-		attribute.String(telemetry.MetricsSpanIDAttr, spanCtx.SpanID().String()),
-		attribute.String("model", c.endpoint.Model),
-		attribute.String("provider", string(c.endpoint.Provider)),
-	}
-
-	return attrs, nil
-}
-
-// parseLLMTokenUsage parses the stderr output from GitHub Copilot CLI to extract token usage information
-func parseLLMTokenUsage(output string) LLMTokenUsage {
+// parseCopilotTokenMetadata parses the stderr output (GHCP CLI Meatdata) from GitHub Copilot CLI to extract token usage information
+func parseCopilotTokenMetadata(copilotclimetadata string) LLMTokenUsage {
 	var tokenUsage LLMTokenUsage
 
 	// Parse the usage line that contains model-specific token information
-	// Example: "claude-sonnet-4.5    7.5k input, 52 output, 3.6k cache read (Est. 1 Premium request)"
+	// Example: "claude-sonnet-4.5    7.5k input, 52 output, 3.6k cache read, 3.7k cache write (Est. 1 Premium request)"
+	// Note: cache write is optional and may not always be present
 
-	// Look for the pattern: model name followed by input, output, cache read values
-	re := regexp.MustCompile(`(\d+(?:\.\d+)?)(k?)\s+input,\s*(\d+(?:\.\d+)?)(k?)\s+output,\s*(\d+(?:\.\d+)?)(k?)\s+cache read,\s*(\d+(?:\.\d+)?)(k?)\s+cache write`)
-	matches := re.FindStringSubmatch(output)
+	// Look for the pattern: #k input, #k output, #k cache read, and optionally #k cache write
+	re := regexp.MustCompile(`(\d+(?:\.\d+)?)(k?)\s+input,\s*(\d+(?:\.\d+)?)(k?)\s+output,\s*(\d+(?:\.\d+)?)(k?)\s+cache read(?:,\s*(\d+(?:\.\d+)?)(k?)\s+cache write)?`)
+	matches := re.FindStringSubmatch(copilotclimetadata)
 
-	if len(matches) >= 7 {
-		// Parse input tokens
-		if inputVal, err := strconv.ParseFloat(matches[1], 64); err == nil {
-			if strings.ToLower(matches[2]) == "k" {
-				inputVal *= 1000
-			}
-			tokenUsage.InputTokens = int64(inputVal)
-		}
+	if len(matches) > 7 {
+		tokenUsage.InputTokens = parseTokenValue(matches[1], matches[2])
+		tokenUsage.OutputTokens = parseTokenValue(matches[3], matches[4])
+		tokenUsage.CachedTokenReads = parseTokenValue(matches[5], matches[6])
 
-		// Parse output tokens
-		if outputVal, err := strconv.ParseFloat(matches[3], 64); err == nil {
-			if strings.ToLower(matches[4]) == "k" {
-				outputVal *= 1000
-			}
-			tokenUsage.OutputTokens = int64(outputVal)
-		}
-
-		// Parse cache read tokens
-		if cacheVal, err := strconv.ParseFloat(matches[5], 64); err == nil {
-			if strings.ToLower(matches[6]) == "k" {
-				cacheVal *= 1000
-			}
-			tokenUsage.CachedTokenReads = int64(cacheVal)
-		}
-
-		// Parse cache write tokens
-		if cacheVal, err := strconv.ParseFloat(matches[7], 64); err == nil {
-			if strings.ToLower(matches[8]) == "k" {
-				cacheVal *= 1000
-			}
-			tokenUsage.CachedTokenWrites = int64(cacheVal)
-		}
+		// Note: cache write tokens are optional and may not always be present
+		tokenUsage.CachedTokenWrites = parseTokenValue(matches[7], matches[8])
 
 		tokenUsage.TotalTokens = tokenUsage.InputTokens + tokenUsage.OutputTokens
 	}
 
 	return tokenUsage
+}
+
+// parseTokenValue converts a string token value from GitHub Copilot CLI Metadata with an optional 'k' multiplier into an int64
+func parseTokenValue(valueStr string, multiplierStr string) int64 {
+	// Convert string to a float first to handle decimal values
+	if inputVal, err := strconv.ParseFloat(valueStr, 64); err == nil {
+		//  Apply multiplier if 'k' is present (e.g 3.5k = 3500)
+		if strings.ToLower(multiplierStr) == "k" {
+			inputVal *= 1000
+		}
+		return int64(inputVal)
+	}
+	return int64(0)
 }

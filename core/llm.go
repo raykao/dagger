@@ -171,8 +171,9 @@ type LLMRouter struct {
 	GeminiBaseURL string
 	GeminiModel   string
 
-	GitHubToken string
-	GitHubModel string
+	GitHubToken      string
+	GitHubModel      string
+	GitHubCliVersion string
 }
 
 func (r *LLMRouter) isAnthropicModel(model string) bool {
@@ -261,7 +262,7 @@ func (r *LLMRouter) routeGitHubModel() *LLMEndpoint {
 		Provider: GitHub,
 	}
 
-	endpoint.Client = newGhcpClient(endpoint)
+	endpoint.Client = newGhcpClient(endpoint, r.GitHubCliVersion)
 
 	return endpoint
 }
@@ -407,6 +408,9 @@ func (r *LLMRouter) LoadConfig(ctx context.Context, getenv func(context.Context,
 	eg.Go(func() error {
 		return save("GITHUB_MODEL", &r.GitHubModel)
 	})
+	eg.Go(func() error {
+		return save("GITHUB_CLI_VERSION", &r.GitHubCliVersion)
+	})
 
 	var (
 		openAIDisableStreaming string
@@ -427,6 +431,11 @@ func (r *LLMRouter) LoadConfig(ctx context.Context, getenv func(context.Context,
 			return err
 		}
 		r.OpenAIDisableStreaming = v
+	}
+
+	// Set defaults for fields that weren't populated
+	if r.GitHubCliVersion == "" {
+		r.GitHubCliVersion = "latest" // or whatever default you want
 	}
 
 	return nil
