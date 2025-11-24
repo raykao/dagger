@@ -261,7 +261,7 @@ func (r *LLMRouter) routeGitHubModel() *LLMEndpoint {
 		Provider: GitHub,
 	}
 
-	endpoint.Client = newGhcpClient(endpoint, nil, nil)
+	endpoint.Client = newGhcpClient(endpoint)
 
 	return endpoint
 }
