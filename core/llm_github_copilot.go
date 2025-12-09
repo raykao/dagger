@@ -41,11 +41,14 @@ func GhcpContainer(
 	token string,
 	cliVersion string,
 ) *dagger.Container {
-	return dag.Container().
+
+	copilotClientContainer := dag.Container().
 		From("node:24-bookworm-slim").
-		WithExec([]string{"npm", "install", "-g", fmt.Sprintf("@github/copilot@%s", cliVersion)}).
+		WithExec([]string{"npm", "install", "--global", "@github/copilot"}).
 		WithEnvVariable("GITHUB_TOKEN", token).
 		WithWorkdir("/workspace")
+
+	return copilotClientContainer
 }
 
 // Satisfy the LLMClient interface with SendQuery and IsRetryable
@@ -86,7 +89,7 @@ func (c *GhcpClient) SendQuery(ctx context.Context, history []*ModelMessage, too
 
 	var toolCalls []LLMToolCall
 
-	client.WithExec([]string{"copilot", "-p", "hi"})
+	client.WithExec([]string{"copilot", "--stream", "off", "--prompt", "hi"})
 
 	content, err := client.Stdout(ctx)
 	if err != nil {
