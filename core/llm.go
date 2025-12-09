@@ -39,7 +39,7 @@ const (
 	modelDefaultOpenAI    = "gpt-4.1"
 	modelDefaultMeta      = "llama-3.2"
 	modelDefaultMistral   = "mistral-7b-instruct"
-	modelDefaultGitHub    = "gpt-5"
+	modelDefaultGitHub    = "github-gpt-5"
 )
 
 func resolveModelAlias(maybeAlias string) string {
@@ -193,7 +193,10 @@ func (r *LLMRouter) isMistralModel(model string) bool {
 }
 
 func (r *LLMRouter) isGitHubModel(model string) bool {
-	return strings.HasPrefix(model, "github-") || strings.HasPrefix(model, "github/")
+	return strings.HasPrefix(model, "github-") ||
+		strings.HasPrefix(model, "github/") ||
+		strings.HasPrefix(model, "ghcp-") ||
+		strings.HasPrefix(model, "ghcp/")
 }
 
 func (r *LLMRouter) isReplay(model string) bool {
