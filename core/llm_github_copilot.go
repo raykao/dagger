@@ -86,7 +86,7 @@ func (c *GhcpClient) SendQuery(ctx context.Context, history []*ModelMessage, too
 
 	var toolCalls []LLMToolCall
 
-	client.WithEnvVariable("GITHUB_TOKEN", c.endpoint.Key)
+	client.WithExec([]string{"copilot", "-p", "hi"})
 
 	content, err := client.Stdout(ctx)
 	if err != nil {
