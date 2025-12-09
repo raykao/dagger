@@ -85,18 +85,16 @@ func (c *GhcpClient) SendQuery(ctx context.Context, history []*ModelMessage, too
 		return nil, fmt.Errorf("failed to get outputTokens gauge: %w", err)
 	}
 
-	var client = c.client
-
 	var toolCalls []LLMToolCall
 
-	client = client.WithExec([]string{"copilot", "--stream", "off", "--prompt", "hi"})
+	var copilot = c.client.WithExec([]string{"copilot", "--stream", "off", "--prompt", "hi"})
 
-	content, err := client.Stdout(ctx)
+	content, err := copilot.Stdout(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	ghcpResponseMetadata, err := client.Stderr(ctx)
+	ghcpResponseMetadata, err := copilot.Stderr(ctx)
 	if err != nil {
 		return nil, err
 	}
