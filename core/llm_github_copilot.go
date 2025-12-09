@@ -89,7 +89,7 @@ func (c *GhcpClient) SendQuery(ctx context.Context, history []*ModelMessage, too
 
 	var toolCalls []LLMToolCall
 
-	client.WithExec([]string{"copilot", "--stream", "off", "--prompt", "hi"})
+	client = client.WithExec([]string{"copilot", "--stream", "off", "--prompt", "hi"})
 
 	content, err := client.Stdout(ctx)
 	if err != nil {
